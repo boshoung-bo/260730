@@ -1,3 +1,5 @@
+import json
+import urllib.request
 import pandas as pd
 import plotly.express as px
 import streamlit as st
@@ -6,75 +8,38 @@ import streamlit as st
 # 1. 페이지 기본 설정
 # -----------------------------------------------------------------------------
 st.set_page_config(
-    page_title="천안·아산 읍면동 인구 시각화",
-    page_icon="📊",
+    page_title="천안·아산 읍면동 행정지도 시각화",
+    page_icon="🗺️",
     layout="wide",
 )
 
-st.title("📊 천안시 · 아산시 모든 읍·면·동 인구 시각화")
+st.title("🗺️ 천안시 · 아산시 실제 지도 모양 도형 시각화")
 st.markdown(
-    "무거운 지도 타일 대신 **경량화된 도형(Treemap 및 위치 버블 차트)**으로 천안·아산의 **모든 읍·면·동 인구 통계**를 빠르게 확인하세요."
+    "무거운 배경 타일 대신 **실제 읍·면·동 행정구역 경계선(SVG 도형 이미지)**을 직접 그려 인구 정보를 빠르게 확인할 수 있습니다."
 )
 
-# 주요 읍면동 상대 위치 좌표 (경량화 위치 표현용)
-LOCATION_MAP = {
-    # 천안시 동남구
-    "목천읍": (36.7788, 127.2289),
-    "풍세면": (36.7381, 127.1264),
-    "광덕면": (36.6872, 127.0601),
-    "북면": (36.8378, 127.2483),
-    "성남면": (36.7578, 127.2514),
-    "수신면": (36.7533, 127.2953),
-    "병천면": (36.7933, 127.3006),
-    "동면": (36.8042, 127.3622),
-    "중앙동": (36.8028, 127.1472),
-    "문성동": (36.8083, 127.1528),
-    "원성1동": (36.8067, 127.1628),
-    "원성2동": (36.8008, 127.1611),
-    "봉명동": (36.8003, 127.1358),
-    "일봉동": (36.7903, 127.1389),
-    "신방동": (36.7828, 127.1208),
-    "청룡동": (36.7806, 127.1672),
-    "신안동": (36.8228, 127.1689),
-    # 천안시 서북구
-    "성환읍": (36.9161, 127.1322),
-    "성거읍": (36.8839, 127.1683),
-    "직산읍": (36.8722, 127.1494),
-    "입장면": (36.9069, 127.2181),
-    "성정1동": (36.8153, 127.1383),
-    "성정2동": (36.8239, 127.1378),
-    "쌍용1동": (36.7967, 127.1228),
-    "쌍용2동": (36.7958, 127.1139),
-    "쌍용3동": (36.7903, 127.1111),
-    "불당1동": (36.8106, 127.1089),
-    "불당2동": (36.8180, 127.1030),
-    "백석동": (36.8289, 127.1189),
-    "부성1동": (36.8406, 127.1389),
-    "부성2동": (36.8489, 127.1139),
-    # 아산시
-    "염치읍": (36.8239, 126.9989),
-    "배방읍": (36.7761, 127.0544),
-    "송악면": (36.7028, 127.0019),
-    "탕정면": (36.8089, 127.0639),
-    "음봉면": (36.8489, 127.0208),
-    "둔포면": (36.9069, 127.0389),
-    "영인면": (36.8819, 126.9369),
-    "인주면": (36.8889, 126.8889),
-    "선장면": (36.7839, 126.8889),
-    "도고면": (36.7589, 126.9139),
-    "신창면": (36.7719, 126.9489),
-    "온양1동": (36.7869, 127.0008),
-    "온양2동": (36.7819, 127.0069),
-    "온양3동": (36.7969, 127.0189),
-    "온양4동": (36.7719, 126.9808),
-    "온양5동": (36.7608, 126.9939),
-    "온양6동": (36.7628, 127.0219),
-}
+# -----------------------------------------------------------------------------
+# 2. GeoJSON (지도 모양 데이터) & 인구 데이터 로드 및 전처리
+# -----------------------------------------------------------------------------
+@st.cache_data
+def load_geojson():
+    # 대한민국 읍면동 경계 GeoJSON URL
+    url = "https://raw.githubusercontent.com/southkorea/southkorea-maps/master/kostat/2013/json/hangjeongdong_44.json"
+    req = urllib.request.urlopen(url)
+    geojson_data = json.loads(req.read().decode("utf-8"))
+
+    # 천안시(44131, 44133) 및 아산시(44200) 관련 읍면동 경계만 추출
+    ca_features = []
+    for feature in geojson_data["features"]:
+        code = feature["properties"]["code"]
+        # 충남 천안시 동남구(44131), 서북구(44133), 아산시(44200)
+        if code.startswith("4413") or code.startswith("4420"):
+            ca_features.append(feature)
+
+    geojson_data["features"] = ca_features
+    return geojson_data
 
 
-# -----------------------------------------------------------------------------
-# 2. 데이터 로드 및 전처리
-# -----------------------------------------------------------------------------
 @st.cache_data
 def load_data():
     pop_url = "https://raw.githubusercontent.com/greatsong/modudata/main/data/population_yearly.csv.gz"
@@ -121,9 +86,6 @@ def load_data():
     df_ca["아이비율"] = round((df_ca["아이인구"] / df_ca["총인구"]) * 100, 1)
     df_ca["여성비율"] = round((df_ca["여성인구"] / df_ca["총인구"]) * 100, 1)
 
-    df_ca["lat"] = df_ca["동"].map(lambda x: LOCATION_MAP.get(x, (36.81, 127.11))[0])
-    df_ca["lon"] = df_ca["동"].map(lambda x: LOCATION_MAP.get(x, (36.81, 127.11))[1])
-
     df_ca["지역풀네임"] = (
         df_ca["도시명"] + " " + df_ca["시군구"] + " " + df_ca["동"]
     )
@@ -131,7 +93,8 @@ def load_data():
     return df_ca, latest_year
 
 
-with st.spinner("데이터를 로딩 중입니다..."):
+with st.spinner("천안·아산 경계선 지도 및 인구 데이터를 불러오는 중입니다..."):
+    geojson_data = load_geojson()
     df_ca, latest_year = load_data()
 
 # -----------------------------------------------------------------------------
@@ -159,7 +122,7 @@ metric_map = {
     "여성 비율 (%)": "여성비율",
 }
 selected_metric_label = st.sidebar.selectbox(
-    "도형 색상/크기 표현 지표", list(metric_map.keys())
+    "도형 지도 색상 지표", list(metric_map.keys())
 )
 selected_metric_col = metric_map[selected_metric_label]
 
@@ -173,7 +136,7 @@ else:
     display_df = filtered_df.copy()
 
 # -----------------------------------------------------------------------------
-# 4. 상단 핵심 요약
+# 4. 상단 핵심 요약 (KPI Cards)
 # -----------------------------------------------------------------------------
 st.caption(f"기준 연도: **{latest_year}년** | 대상 읍·면·동 수: **{len(display_df)}개**")
 
@@ -206,55 +169,22 @@ c5.metric(
 st.divider()
 
 # -----------------------------------------------------------------------------
-# 5. 초경량 도형 이미지 시각화 (Treemap 및 위치 버블 차트)
+# 5. 실제 지도 모양 도형(SVG Polygon) 시각화
 # -----------------------------------------------------------------------------
-st.subheader("🟩 1. 읍·면·동별 인구 비중 (사각형 Treemap)")
-st.caption(
-    "사각형의 **크기는 총인구 수**, **색상은 선택한 지표**를 나타냅니다."
-)
+st.subheader(f"🗺️ 천안·아산 실제 지도 경계 모양 ({selected_metric_label})")
 
-fig_tree = px.treemap(
+fig = px.choropleth(
     display_df,
-    path=["도시명", "시군구", "동"],
-    values="총인구",
+    geojson=geojson_data,
+    locations="동",
+    featureidkey="properties.name",
     color=selected_metric_col,
     color_continuous_scale="Reds"
     if "고령" in selected_metric_label or "노인" in selected_metric_label
-    else "Viridis",
-    hover_data={
-        "총인구": ":,명",
-        "남성인구": ":,명",
-        "여성인구": ":,명",
-        "아이인구": ":,명",
-        "어른인구": ":,명",
-        "노인인구": ":,명",
-        "고령화율": ":.1f%",
-    },
-)
-
-fig_tree.update_layout(margin=dict(t=10, l=10, r=10, b=10), height=450)
-st.plotly_chart(fig_tree, use_container_width=True)
-
-st.subheader("🔵 2. 상대 위치 기반 읍·면·동 분포 (원형 좌표 차트)")
-st.caption(
-    "무거운 지도를 대체하여 **경도/위도 좌표에 도형(Circle Marker)**만 표시하여 렌더링 속도를 대폭 개선했습니다."
-)
-
-fig_scatter = px.scatter(
-    display_df,
-    x="lon",
-    y="lat",
-    size="총인구",
-    color=selected_metric_col,
-    text="동",
-    size_max=30,
-    color_continuous_scale="Reds"
-    if "고령" in selected_metric_label or "노인" in selected_metric_label
-    else "Viridis",
+    else "YlGnBu",
     hover_name="지역풀네임",
     hover_data={
-        "lat": False,
-        "lon": False,
+        "동": False,
         "총인구": ":,명",
         "남성인구": ":,명",
         "여성인구": ":,명",
@@ -265,22 +195,21 @@ fig_scatter = px.scatter(
     },
 )
 
-fig_scatter.update_traces(textposition="top center")
-fig_scatter.update_layout(
-    xaxis_title="경도 (Longitude)",
-    yaxis_title="위도 (Latitude)",
-    height=500,
-    margin=dict(t=20, l=20, r=20, b=20),
+# 실제 지도 구역만 깔끔하게 보이고 축/격자선은 숨김 처리
+fig.update_geos(fitbounds="locations", visible=False)
+fig.update_layout(
+    margin={"r": 0, "t": 10, "l": 0, "b": 10},
+    height=600,
 )
 
-st.plotly_chart(fig_scatter, use_container_width=True)
+st.plotly_chart(fig, use_container_width=True)
 
 st.divider()
 
 # -----------------------------------------------------------------------------
 # 6. 상세 데이터표
 # -----------------------------------------------------------------------------
-st.subheader("📋 천안·아산 읍·면·동 상세 인구 표")
+st.subheader("📋 천안·아산 읍·면·동 상세 데이터")
 
 sort_col = st.selectbox(
     "정렬 기준 컬럼",
