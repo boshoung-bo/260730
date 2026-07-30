@@ -1,4 +1,3 @@
-import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
@@ -7,17 +6,17 @@ import streamlit as st
 # 1. 페이지 기본 설정
 # -----------------------------------------------------------------------------
 st.set_page_config(
-    page_title="천안·아산 읍면동별 상세 인구 지도",
-    page_icon="🗺️",
+    page_title="천안·아산 읍면동 인구 시각화",
+    page_icon="📊",
     layout="wide",
 )
 
-st.title("🗺️ 천안시 · 아산시 모든 읍·면·동 인구 지도")
+st.title("📊 천안시 · 아산시 모든 읍·면·동 인구 시각화")
 st.markdown(
-    "천안시(동남구/서북구)와 아산시 내 **모든 읍·면·동**의 위치와 **남녀 · 연령대별(아이/어른/노인)** 인구 정보를 지도에서 확인하세요."
+    "무거운 지도 타일 대신 **경량화된 도형(Treemap 및 위치 버블 차트)**으로 천안·아산의 **모든 읍·면·동 인구 통계**를 빠르게 확인하세요."
 )
 
-# 천안/아산 주요 읍면동 중심 좌표 딕셔너리 (위도, 경도)
+# 주요 읍면동 상대 위치 좌표 (경량화 위치 표현용)
 LOCATION_MAP = {
     # 천안시 동남구
     "목천읍": (36.7788, 127.2289),
@@ -81,11 +80,9 @@ def load_data():
     pop_url = "https://raw.githubusercontent.com/greatsong/modudata/main/data/population_yearly.csv.gz"
     df = pd.read_csv(pop_url, dtype={"코드": str})
 
-    # 최신 연도 기준
     latest_year = df["연도"].max()
     df_latest = df[df["연도"] == latest_year].copy()
 
-    # 천안시 및 아산시 추출
     df_ca = df_latest[
         (df_latest["시도"] == "충청남도")
         & (df_latest["시군구"].str.contains("천안|아산"))
@@ -95,7 +92,6 @@ def load_data():
         lambda x: "천안시" if "천안시" in x else "아산시"
     )
 
-    # 연령대 컬럼 분류
     child_cols, adult_cols, elderly_cols = [], [], []
     male_cols = [c for c in df_ca.columns if c.startswith("남_")]
     female_cols = [c for c in df_ca.columns if c.startswith("여_")]
@@ -114,7 +110,6 @@ def load_data():
         elif "100" in col:
             elderly_cols.append(col)
 
-    # 인구 수 집계
     df_ca["총인구"] = df_ca[total_cols].sum(axis=1)
     df_ca["남성인구"] = df_ca[male_cols].sum(axis=1)
     df_ca["여성인구"] = df_ca[female_cols].sum(axis=1)
@@ -122,16 +117,13 @@ def load_data():
     df_ca["어른인구"] = df_ca[adult_cols].sum(axis=1)
     df_ca["노인인구"] = df_ca[elderly_cols].sum(axis=1)
 
-    # 비율 계산 (%)
     df_ca["고령화율"] = round((df_ca["노인인구"] / df_ca["총인구"]) * 100, 1)
     df_ca["아이비율"] = round((df_ca["아이인구"] / df_ca["총인구"]) * 100, 1)
     df_ca["여성비율"] = round((df_ca["여성인구"] / df_ca["총인구"]) * 100, 1)
 
-    # 위도, 경도 좌표 매핑
     df_ca["lat"] = df_ca["동"].map(lambda x: LOCATION_MAP.get(x, (36.81, 127.11))[0])
     df_ca["lon"] = df_ca["동"].map(lambda x: LOCATION_MAP.get(x, (36.81, 127.11))[1])
 
-    # 표기용 풀네임
     df_ca["지역풀네임"] = (
         df_ca["도시명"] + " " + df_ca["시군구"] + " " + df_ca["동"]
     )
@@ -139,11 +131,11 @@ def load_data():
     return df_ca, latest_year
 
 
-with st.spinner("천안 및 아산의 읍·면·동 인구 데이터를 로딩 중입니다..."):
+with st.spinner("데이터를 로딩 중입니다..."):
     df_ca, latest_year = load_data()
 
 # -----------------------------------------------------------------------------
-# 3. 사이드바 검색 및 필터
+# 3. 사이드바 필터 설정
 # -----------------------------------------------------------------------------
 st.sidebar.header("🔍 조회 필터 설정")
 
@@ -158,7 +150,6 @@ elif city_filter == "아산시":
 else:
     filtered_df = df_ca.copy()
 
-# 지도 색상 지표 선택
 metric_map = {
     "총인구 (명)": "총인구",
     "고령화율 (%)": "고령화율",
@@ -168,11 +159,10 @@ metric_map = {
     "여성 비율 (%)": "여성비율",
 }
 selected_metric_label = st.sidebar.selectbox(
-    "지도 크기/색상 표현 지표", list(metric_map.keys())
+    "도형 색상/크기 표현 지표", list(metric_map.keys())
 )
 selected_metric_col = metric_map[selected_metric_label]
 
-# 특정 읍면동 직접 검색
 selected_dong = st.sidebar.selectbox(
     "특정 읍·면·동 상세 검색", ["전체 보기"] + list(filtered_df["동"].unique())
 )
@@ -183,7 +173,7 @@ else:
     display_df = filtered_df.copy()
 
 # -----------------------------------------------------------------------------
-# 4. 상단 요약 카드 (KPI Cards)
+# 4. 상단 핵심 요약
 # -----------------------------------------------------------------------------
 st.caption(f"기준 연도: **{latest_year}년** | 대상 읍·면·동 수: **{len(display_df)}개**")
 
@@ -216,21 +206,51 @@ c5.metric(
 st.divider()
 
 # -----------------------------------------------------------------------------
-# 5. 모든 읍면동 위치 지도 시각화 (Plotly Scatter Mapbox)
+# 5. 초경량 도형 이미지 시각화 (Treemap 및 위치 버블 차트)
 # -----------------------------------------------------------------------------
-st.subheader(f"📍 천안·아산 읍·면·동 위치 및 {selected_metric_label} 지도")
+st.subheader("🟩 1. 읍·면·동별 인구 비중 (사각형 Treemap)")
+st.caption(
+    "사각형의 **크기는 총인구 수**, **색상은 선택한 지표**를 나타냅니다."
+)
 
-fig = px.scatter_mapbox(
+fig_tree = px.treemap(
     display_df,
-    lat="lat",
-    lon="lon",
-    size="총인구",  # 원의 크기는 총인구 수에 비례
-    color=selected_metric_col,  # 색상은 선택한 지표 기준
+    path=["도시명", "시군구", "동"],
+    values="총인구",
+    color=selected_metric_col,
     color_continuous_scale="Reds"
     if "고령" in selected_metric_label or "노인" in selected_metric_label
     else "Viridis",
-    size_max=35,
-    zoom=10 if selected_dong == "전체 보기" else 12,
+    hover_data={
+        "총인구": ":,명",
+        "남성인구": ":,명",
+        "여성인구": ":,명",
+        "아이인구": ":,명",
+        "어른인구": ":,명",
+        "노인인구": ":,명",
+        "고령화율": ":.1f%",
+    },
+)
+
+fig_tree.update_layout(margin=dict(t=10, l=10, r=10, b=10), height=450)
+st.plotly_chart(fig_tree, use_container_width=True)
+
+st.subheader("🔵 2. 상대 위치 기반 읍·면·동 분포 (원형 좌표 차트)")
+st.caption(
+    "무거운 지도를 대체하여 **경도/위도 좌표에 도형(Circle Marker)**만 표시하여 렌더링 속도를 대폭 개선했습니다."
+)
+
+fig_scatter = px.scatter(
+    display_df,
+    x="lon",
+    y="lat",
+    size="총인구",
+    color=selected_metric_col,
+    text="동",
+    size_max=30,
+    color_continuous_scale="Reds"
+    if "고령" in selected_metric_label or "노인" in selected_metric_label
+    else "Viridis",
     hover_name="지역풀네임",
     hover_data={
         "lat": False,
@@ -243,35 +263,31 @@ fig = px.scatter_mapbox(
         "노인인구": ":,명",
         "고령화율": ":.1f%",
     },
-    mapbox_style="open-street-map",  # 백그라운드 지도 타일 표시 (도로/동 위치 파악 용이)
-    center={
-        "lat": display_df["lat"].mean() if len(display_df) > 0 else 36.81,
-        "lon": display_df["lon"].mean() if len(display_df) > 0 else 127.11,
-    },
 )
 
-fig.update_layout(
-    margin={"r": 0, "t": 10, "l": 0, "b": 10},
-    height=600,
+fig_scatter.update_traces(textposition="top center")
+fig_scatter.update_layout(
+    xaxis_title="경도 (Longitude)",
+    yaxis_title="위도 (Latitude)",
+    height=500,
+    margin=dict(t=20, l=20, r=20, b=20),
 )
 
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(fig_scatter, use_container_width=True)
 
 st.divider()
 
 # -----------------------------------------------------------------------------
-# 6. 전체 읍·면·동 세부 인구 데이터표
+# 6. 상세 데이터표
 # -----------------------------------------------------------------------------
-st.subheader("📋 천안·아산 읍·면·동 인구 상세 데이터")
+st.subheader("📋 천안·아산 읍·면·동 상세 인구 표")
 
-# 정렬 옵션 선택
 sort_col = st.selectbox(
     "정렬 기준 컬럼",
     ["총인구", "고령화율", "아이인구", "어른인구", "노인인구", "여성비율"],
 )
 sorted_table = display_df.sort_values(by=sort_col, ascending=False)
 
-# 보기 좋은 컬럼명으로 변경
 table_view = sorted_table[
     [
         "도시명",
@@ -300,5 +316,5 @@ st.dataframe(
         }
     ),
     use_container_width=True,
-    height=400,
+    height=350,
 )
