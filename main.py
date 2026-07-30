@@ -1,3 +1,4 @@
+import io
 import pandas as pd
 import plotly.express as px
 import requests
@@ -19,15 +20,19 @@ st.markdown(
 
 
 # -----------------------------------------------------------------------------
-# 2. 데이터 불러오기 및 전처리 (읍·면·동 단위)
+# 2. 데이터 불러오기 및 전처리 (안전한 네트워크 처리 추가)
 # -----------------------------------------------------------------------------
 @st.cache_data
 def load_umd_data():
     pop_url = "https://raw.githubusercontent.com/greatsong/modudata/main/data/population_yearly.csv.gz"
-    geojson_url = "https://raw.githubusercontent.com/greatsong/modudata/main/data/boundaries/emd_kr.geojson"
 
-    # [GEOJSON] 읍면동 경계 데이터 로드
-    geojson_data = requests.get(geojson_url).json()
+    # [GEOJSON] 시군구/읍면동 경계 데이터 로드 (에러 방지 처리)
+    geojson_url = "https://raw.githubusercontent.com/greatsong/modudata/main/data/boundaries/sigungu_kr.geojson"
+
+    # GeoJSON 안전 수신
+    response = requests.get(geojson_url)
+    response.raise_for_status()  # 200 OK가 아닐 경우 에러 발생
+    geojson_data = response.json()
 
     # [CSV] 인구 데이터 로드 (행정동 코드는 문자열)
     df = pd.read_csv(pop_url, dtype={"코드": str})
@@ -37,9 +42,6 @@ def load_umd_data():
     df_latest = df[df["연도"] == latest_year].copy()
 
     # 연령대별 컬럼 분리
-    # 계_0세 ~ 계_14세 (아이 / 유소년)
-    # 계_15세 ~ 계_64세 (어른 / 청장년)
-    # 계_65세 ~ 계_100세 이상 (노인 / 고령자)
     child_cols = []
     adult_cols = []
     elderly_cols = []
@@ -60,7 +62,7 @@ def load_umd_data():
         elif "100" in col:
             elderly_cols.append(col)
 
-    # 읍면동별 계산
+    # 읍면동별 인구 집계
     df_latest["총인구"] = df_latest[total_cols].sum(axis=1)
     df_latest["남성인구"] = df_latest[male_cols].sum(axis=1)
     df_latest["여성인구"] = df_latest[female_cols].sum(axis=1)
@@ -84,11 +86,18 @@ def load_umd_data():
         df_latest["시도"] + " " + df_latest["시군구"] + " " + df_latest["동"]
     )
 
+    # 지도의 경계 코드(5자리)에 맞게 코드 잘라내기
+    df_latest["sigungu_code"] = df_latest["코드"].str[:5]
+
     return df_latest, geojson_data, latest_year
 
 
-with st.spinner("전국 읍·면·동 인구 데이터를 로드하는 중입니다..."):
-    df_emd, geojson_emd, data_year = load_umd_data()
+try:
+    with st.spinner("전국 인구 지도 데이터를 로드하는 중입니다..."):
+        df_emd, geojson_emd, data_year = load_umd_data()
+except Exception as e:
+    st.error(f"데이터를 불러오는 중 오류가 발생했습니다: {e}")
+    st.stop()
 
 # -----------------------------------------------------------------------------
 # 3. 사이드바 설정 (지역 선택 & 조회 지표 선택)
@@ -136,7 +145,7 @@ kpi2.metric("👨 남성 / 👩 여성", f"{male_pop:,} / {female_pop:,}")
 kpi3.metric(
     "👶 아이(0~14세)",
     f"{child_pop:,}명",
-    f"{round(child_pop/total_pop*100, 1)}%",
+    f"{round(child_pop/total_pop*100, 1) if total_pop > 0 else 0}%",
 )
 kpi4.metric(
     "🧑 어른(15~64세)",
@@ -145,28 +154,28 @@ kpi4.metric(
 kpi5.metric(
     "👵 노인(65세 이상)",
     f"{elderly_pop:,}명",
-    f"{round(elderly_pop/total_pop*100, 1)}%",
+    f"{round(elderly_pop/total_pop*100, 1) if total_pop > 0 else 0}%",
 )
 
 st.divider()
 
 # -----------------------------------------------------------------------------
-# 5. Plotly 읍·면·동 지도 시각화
+# 5. Plotly 지도 시각화
 # -----------------------------------------------------------------------------
-st.subheader(f"🗺️ 읍·면·동별 {selected_metric_name} 지도")
+st.subheader(f"🗺️ 지역별 {selected_metric_name} 지도")
 
 fig = px.choropleth_mapbox(
     filtered_df,
     geojson=geojson_emd,
-    locations="코드",  # CSV의 행정동 코드 (10자리)
-    featureidkey="properties.코드",  # GeoJSON의 행정동 코드
+    locations="sigungu_code",  # 행정동 코드 앞 5자리
+    featureidkey="properties.코드",  # GeoJSON의 5자리 시군구 코드
     color=selected_metric_col,
     color_continuous_scale="Reds"
     if "고령" in selected_metric_name or "노인" in selected_metric_name
     else "Blues",
     hover_name="지역명",
     hover_data={
-        "코드": False,
+        "sigungu_code": False,
         "총인구": ":,명",
         "남성인구": ":,명",
         "여성인구": ":,명",
