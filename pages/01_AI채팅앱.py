@@ -36,13 +36,12 @@ if user_input:
     with st.chat_message("user"):
         st.markdown(user_input)
 
-    # AI 답 받아오기 (실패하면 빨간 오류 화면 대신 안내 문구)
+    # AI 답 받아오기
     with st.chat_message("assistant"):
         try:
             stream = client.chat.completions.create(
-                model="solar-open2",                 # 모델 이름은 그대로 유지
+                model="solar-pro",                   # Upstage 공식 추천 모델 (필요 시 solar-mini 등으로 변경)
                 messages=st.session_state.messages,  # 대화 전체를 함께 보내 기억 유지
-                reasoning_effort="none",             # 추론 끄기 -> 바로 답변 시작
                 stream=True,                         # 글자가 실시간으로 흐르게
             )
             answer = st.write_stream(
@@ -51,5 +50,7 @@ if user_input:
             )
             # AI 답도 기록에 저장 (다음 질문에 이어서 사용)
             st.session_state.messages.append({"role": "assistant", "content": answer})
-        except Exception:
-            st.error("응답을 받지 못했습니다. 잠시 후 다시 보내 주세요.")
+            
+        except Exception as e:
+            # 에러 발생 시 원인을 구체적으로 출력합니다.
+            st.error(f"응답을 받지 못했습니다. (오류 내용: {e})")
