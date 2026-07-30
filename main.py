@@ -1,270 +1,254 @@
+# -*- coding: utf-8 -*-
+"""
+천안 · 아산 지도 (2015년~2026년)
+- 시군구 경계는 실제 GeoJSON 데이터를 사용합니다. (천안시 동남구 / 천안시 서북구 / 아산시)
+- ⚠️ 읍·면·동 단위의 실제 경계선(폴리곤) 데이터는 제공되지 않습니다.
+  그래서 읍·면·동은 각 시군구 영역 안에 원형으로 흩어 놓은 '위치 표시용 점'으로 표현합니다.
+  (실제 동의 지리적 위치가 아니라 근사적인 표시입니다.)
+- 지도에 마우스를 올리면 남/여, 아이(0~14세)/어른(15~64세)/노인(65세 이상) 인구를 보여줍니다.
+"""
+
+import math
+
 import pandas as pd
-import plotly.express as px
+import plotly.graph_objects as go
 import requests
 import streamlit as st
 
-# -----------------------------------------------------------------------------
-# 1. 페이지 기본 설정
-# -----------------------------------------------------------------------------
-st.set_page_config(
-    page_title="천안·아산 읍면동 인구 및 연령대별 대시보드",
-    page_icon="🏙️",
-    layout="wide",
-)
+st.set_page_config(page_title="천안·아산 인구 지도", layout="wide")
 
-st.title("🏙️ 천안시·아산시 읍·면·동 인구 및 연령·성별 구조 분석")
-st.markdown(
-    "충청남도 **천안시 및 아산시**의 읍·면·동별 **남녀, 아이(0~14세), 어른(15~64세), 노인(65세 이상)** 인구를 분석합니다."
+POPULATION_URL = (
+    "https://raw.githubusercontent.com/greatsong/modudata/main/data/population_yearly.csv.gz"
+)
+GEOJSON_URL = (
+    "https://raw.githubusercontent.com/greatsong/modudata/main/data/boundaries/sigungu_kr.geojson"
 )
 
 
-# -----------------------------------------------------------------------------
-# 2. 데이터 불러오기 및 전처리 (천안·아산 전용)
-# -----------------------------------------------------------------------------
-@st.cache_data
-def load_cheonan_asan_data():
-    pop_url = "https://raw.githubusercontent.com/greatsong/modudata/main/data/boundaries/../population_yearly.csv.gz"
-    geojson_url = "https://raw.githubusercontent.com/greatsong/modudata/main/data/boundaries/sigungu_kr.geojson"
+# -----------------------------
+# 데이터 불러오기
+# -----------------------------
+@st.cache_data(show_spinner="인구 데이터를 불러오는 중...")
+def load_population():
+    # '코드'는 숫자가 아니라 이름표이므로 문자열로 읽습니다.
+    return pd.read_csv(POPULATION_URL, compression="gzip", dtype={"코드": str})
 
-    # GeoJSON 수신
-    response = requests.get(geojson_url)
-    response.raise_for_status()
-    geojson_data = response.json()
 
-    # 인구 데이터 로드 (행정동 코드는 문자열)
-    df = pd.read_csv(
-        "https://raw.githubusercontent.com/greatsong/modudata/main/data/population_yearly.csv.gz",
-        dtype={"코드": str},
+@st.cache_data(show_spinner="지도 경계 데이터를 불러오는 중...")
+def load_geojson():
+    res = requests.get(GEOJSON_URL, timeout=30)
+    res.raise_for_status()
+    return res.json()
+
+
+def parse_age(col: str) -> int:
+    """'계_65세' -> 65, '계_100세 이상' -> 100 처럼 열 이름에서 나이를 뽑아냅니다."""
+    age_str = col.split("_", 1)[1].replace("이상", "").replace("세", "").strip()
+    return int(age_str)
+
+
+def add_demographics(df: pd.DataFrame) -> pd.DataFrame:
+    """남/여, 아이(0~14)/어른(15~64)/노인(65+) 인구 열을 추가합니다."""
+    male_cols = [c for c in df.columns if c.startswith("남_")]
+    female_cols = [c for c in df.columns if c.startswith("여_")]
+    total_cols = [c for c in df.columns if c.startswith("계_")]
+
+    child_cols = [c for c in total_cols if parse_age(c) <= 14]
+    adult_cols = [c for c in total_cols if 15 <= parse_age(c) <= 64]
+    elderly_cols = [c for c in total_cols if parse_age(c) >= 65]
+
+    df = df.copy()
+    df["남"] = df[male_cols].sum(axis=1)
+    df["여"] = df[female_cols].sum(axis=1)
+    df["아이"] = df[child_cols].sum(axis=1)
+    df["어른"] = df[adult_cols].sum(axis=1)
+    df["노인"] = df[elderly_cols].sum(axis=1)
+    df["전체인구"] = df["남"] + df["여"]
+    return df
+
+
+def to_city(sigungu):
+    """시군구 이름을 보고 '천안' / '아산' / None 으로 분류합니다."""
+    if pd.isna(sigungu):
+        return None
+    sigungu = str(sigungu)
+    if "천안" in sigungu:
+        return "천안"
+    if "아산" in sigungu:
+        return "아산"
+    return None
+
+
+def polygon_centroid(geometry: dict):
+    """폴리곤(또는 멀티폴리곤) 좌표를 모두 모아 평균 좌표(대략적인 중심점)를 구합니다."""
+    coords = []
+
+    def walk(node):
+        # 좌표 하나는 [경도, 위도] 형태 (숫자 두 개)
+        if isinstance(node[0], (int, float)):
+            coords.append(node)
+        else:
+            for child in node:
+                walk(child)
+
+    walk(geometry["coordinates"])
+    lons = [c[0] for c in coords]
+    lats = [c[1] for c in coords]
+    return sum(lons) / len(lons), sum(lats) / len(lats)
+
+
+# -----------------------------
+# 데이터 준비
+# -----------------------------
+pop_df = load_population()
+geojson = load_geojson()
+
+pop_df["도시"] = pop_df["시군구"].apply(to_city)
+target_df = pop_df[pop_df["도시"].isin(["천안", "아산"])].copy()
+target_df = add_demographics(target_df)
+target_df["시군구코드"] = target_df["코드"].str[:5]
+
+st.title("🏙️ 천안 · 아산 인구 지도")
+st.caption(
+    "시군구 경계는 실제 지도이며, 읍·면·동은 시군구 안에 흩어 놓은 근사 표시입니다. "
+    "마우스를 올리면 남/여, 아이(0~14세)/어른(15~64세)/노인(65세 이상) 인구가 보입니다."
+)
+
+# 연도 선택 (지도에 표시할 인구 기준 연도)
+연도목록 = sorted(target_df["연도"].unique())
+선택연도 = st.selectbox("연도 선택", 연도목록, index=len(연도목록) - 1)
+
+year_df = target_df[target_df["연도"] == 선택연도]
+
+# -----------------------------
+# 시군구 단위 통계 (천안시 동남구 / 천안시 서북구 / 아산시)
+# -----------------------------
+sigungu_stats = (
+    year_df.groupby(["시군구코드", "시군구", "시도", "도시"])[
+        ["전체인구", "남", "여", "아이", "어른", "노인"]
+    ]
+    .sum()
+    .reset_index()
+)
+
+target_codes = set(sigungu_stats["시군구코드"])
+
+# 천안 · 아산에 해당하는 시군구 geojson feature만 골라내기
+target_features = [
+    f for f in geojson["features"] if f["properties"].get("코드") in target_codes
+]
+target_geojson = {"type": "FeatureCollection", "features": target_features}
+
+# -----------------------------
+# 시군구 폴리곤 중심점 계산 (읍·면·동 점을 뿌리기 위한 기준점)
+# -----------------------------
+centroids = {}
+for f in target_features:
+    code = f["properties"]["코드"]
+    centroids[code] = polygon_centroid(f["geometry"])
+
+# -----------------------------
+# 읍·면·동 단위 통계 + 근사 좌표 부여
+# -----------------------------
+dong_stats = (
+    year_df.groupby(["시군구코드", "시군구", "동", "도시"])[
+        ["전체인구", "남", "여", "아이", "어른", "노인"]
+    ]
+    .sum()
+    .reset_index()
+)
+
+lons, lats = [], []
+for code, group in dong_stats.groupby("시군구코드"):
+    center_lon, center_lat = centroids.get(code, (127.0, 36.5))
+    n = len(group)
+    for i in range(n):
+        # 해바라기씨 배치(phyllotaxis)처럼 중심에서 조금씩 퍼지도록 점을 흩어 놓습니다.
+        angle = i * 137.5 * math.pi / 180
+        radius = 0.006 * math.sqrt(i + 1)
+        lons.append(center_lon + radius * math.cos(angle))
+        lats.append(center_lat + radius * math.sin(angle))
+
+dong_stats = dong_stats.sort_values("시군구코드").reset_index(drop=True)
+dong_stats["경도"] = lons
+dong_stats["위도"] = lats
+
+# -----------------------------
+# 지도 그리기
+# -----------------------------
+fig = go.Figure()
+
+# 1) 시군구 경계 (천안 동남구 / 천안 서북구 / 아산시)
+sigungu_hover = [
+    f"<b>{row['시군구']}</b> ({row['시도']})<br>"
+    f"전체인구: {row['전체인구']:,.0f}명<br>"
+    f"남: {row['남']:,.0f}명 · 여: {row['여']:,.0f}명<br>"
+    f"아이: {row['아이']:,.0f}명 · 어른: {row['어른']:,.0f}명 · 노인: {row['노인']:,.0f}명"
+    for _, row in sigungu_stats.iterrows()
+]
+
+fig.add_trace(
+    go.Choropleth(
+        geojson=target_geojson,
+        locations=sigungu_stats["시군구코드"],
+        z=[1] * len(sigungu_stats),  # 색은 도시 구분용으로만 사용 (수치 의미 없음)
+        featureidkey="properties.코드",
+        colorscale=[[0, "#deebf7"], [1, "#deebf7"]],
+        showscale=False,
+        marker_line_color="#555555",
+        marker_line_width=1,
+        text=sigungu_hover,
+        hoverinfo="text",
+        name="시군구",
+    )
+)
+
+# 2) 읍·면·동 점 (근사 위치, 인구 규모에 따라 점 크기 변화)
+dong_hover = [
+    f"<b>{row['동']}</b> ({row['시군구']})<br>"
+    f"전체인구: {row['전체인구']:,.0f}명<br>"
+    f"남: {row['남']:,.0f}명 · 여: {row['여']:,.0f}명<br>"
+    f"아이: {row['아이']:,.0f}명 · 어른: {row['어른']:,.0f}명 · 노인: {row['노인']:,.0f}명"
+    for _, row in dong_stats.iterrows()
+]
+
+city_colors = {"천안": "#e6550d", "아산": "#2171b5"}
+
+for city, color in city_colors.items():
+    sub = dong_stats[dong_stats["도시"] == city]
+    hover_sub = [dong_hover[i] for i in sub.index]
+    fig.add_trace(
+        go.Scattergeo(
+            lon=sub["경도"],
+            lat=sub["위도"],
+            mode="markers",
+            marker=dict(
+                size=(sub["전체인구"].clip(lower=1)) ** 0.5 / 4,
+                sizemin=3,
+                color=color,
+                line=dict(width=0.5, color="white"),
+                opacity=0.85,
+            ),
+            text=hover_sub,
+            hoverinfo="text",
+            name=f"{city} 읍·면·동",
+        )
     )
 
-    # 가장 최근 연도 데이터 추출
-    latest_year = df["연도"].max()
-    df_latest = df[df["연도"] == latest_year].copy()
-
-    # 충청남도 천안시(동남구/서북구) 및 아산시 데이터만 필터링
-    df_filtered = df_latest[
-        (df_latest["시도"] == "충청남도")
-        & (df_latest["시군구"].str.contains("천안|아산"))
-    ].copy()
-
-    # 도시구분 (천안시 / 아산시)
-    df_filtered["도시명"] = df_filtered["시군구"].apply(
-        lambda x: "천안시" if "천안시" in x else "아산시"
-    )
-
-    # 연령대별 컬럼 분리
-    child_cols = []
-    adult_cols = []
-    elderly_cols = []
-    male_cols = [c for c in df_filtered.columns if c.startswith("남_")]
-    female_cols = [c for c in df_filtered.columns if c.startswith("여_")]
-    total_cols = [c for c in df_filtered.columns if c.startswith("계_")]
-
-    for col in total_cols:
-        age_str = col.replace("계_", "").replace("세", "").replace(" 이상", "")
-        if age_str.isdigit():
-            age = int(age_str)
-            if age <= 14:
-                child_cols.append(col)
-            elif 15 <= age <= 64:
-                adult_cols.append(col)
-            else:
-                elderly_cols.append(col)
-        elif "100" in col:
-            elderly_cols.append(col)
-
-    # 읍면동별 인구 집계
-    df_filtered["총인구"] = df_filtered[total_cols].sum(axis=1)
-    df_filtered["남성인구"] = df_filtered[male_cols].sum(axis=1)
-    df_filtered["여성인구"] = df_filtered[female_cols].sum(axis=1)
-    df_filtered["아이인구"] = df_filtered[child_cols].sum(axis=1)
-    df_filtered["어른인구"] = df_filtered[adult_cols].sum(axis=1)
-    df_filtered["노인인구"] = df_filtered[elderly_cols].sum(axis=1)
-
-    # 비율 계산 (%)
-    df_filtered["고령화율"] = round(
-        (df_filtered["노인인구"] / df_filtered["총인구"]) * 100, 1
-    ).fillna(0)
-    df_filtered["여성비율"] = round(
-        (df_filtered["여성인구"] / df_filtered["총인구"]) * 100, 1
-    ).fillna(0)
-    df_filtered["아이비율"] = round(
-        (df_filtered["아이인구"] / df_filtered["총인구"]) * 100, 1
-    ).fillna(0)
-
-    # 지역 전체 이름 생성 (예: 천안시 동남구 목천읍)
-    df_filtered["지역명"] = (
-        df_filtered["도시명"]
-        + " "
-        + df_filtered["시군구"]
-        + " "
-        + df_filtered["동"]
-    )
-
-    # 지도의 5자리 시군구 코드 매칭용
-    df_filtered["sigungu_code"] = df_filtered["코드"].str[:5]
-
-    return df_filtered, geojson_data, latest_year
-
-
-try:
-    with st.spinner("천안·아산 인구 데이터를 로드하는 중입니다..."):
-        df_ca, geojson_kr, data_year = load_cheonan_asan_data()
-except Exception as e:
-    st.error(f"데이터를 불러오는 중 오류가 발생했습니다: {e}")
-    st.stop()
-
-# -----------------------------------------------------------------------------
-# 3. 사이드바 설정 (도시 필터 & 지표 선택)
-# -----------------------------------------------------------------------------
-st.sidebar.header("🔍 조회 조건 설정")
-
-# 도시 선택 (전체, 천안시, 아산시)
-city_list = ["전체 (천안+아산)", "천안시", "아산시"]
-selected_city = st.sidebar.selectbox("도시 선택", city_list)
-
-# 데이터 필터링
-if selected_city == "천안시":
-    filtered_df = df_ca[df_ca["도시명"] == "천안시"].copy()
-elif selected_city == "아산시":
-    filtered_df = df_ca[df_ca["도시명"] == "아산시"].copy()
-else:
-    filtered_df = df_ca.copy()
-
-# 지도 및 표 표현 지표 선택
-metric_options = {
-    "고령화율 (%)": "고령화율",
-    "총인구 (명)": "총인구",
-    "아이 인구 (0~14세)": "아이인구",
-    "어른 인구 (15~64세)": "어른인구",
-    "노인 인구 (65세 이상)": "노인인구",
-    "여성 비율 (%)": "여성비율",
-}
-selected_metric_name = st.sidebar.selectbox(
-    "조회 지표 선택", list(metric_options.keys())
+# 배경 지도 없이 경계선만, 천안·아산 영역으로 확대
+fig.update_geos(
+    visible=False,
+    fitbounds="locations",
 )
-selected_metric_col = metric_options[selected_metric_name]
-
-# -----------------------------------------------------------------------------
-# 4. 요약 지표 (KPI Cards)
-# -----------------------------------------------------------------------------
-st.caption(f"기준 연도: **{data_year}년** | 선택 지역: **{selected_city}**")
-
-kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
-total_pop = int(filtered_df["총인구"].sum())
-male_pop = int(filtered_df["남성인구"].sum())
-female_pop = int(filtered_df["여성인구"].sum())
-child_pop = int(filtered_df["아이인구"].sum())
-adult_pop = int(filtered_df["어른인구"].sum())
-elderly_pop = int(filtered_df["노인인구"].sum())
-
-kpi1.metric("👥 총인구", f"{total_pop:,}명")
-kpi2.metric("👨 남성 / 👩 여성", f"{male_pop:,} / {female_pop:,}")
-kpi3.metric(
-    "👶 아이(0~14세)",
-    f"{child_pop:,}명",
-    f"{round(child_pop/total_pop*100, 1) if total_pop > 0 else 0}%",
-)
-kpi4.metric("🧑 어른(15~64세)", f"{adult_pop:,}명")
-kpi5.metric(
-    "👵 노인(65세 이상)",
-    f"{elderly_pop:,}명",
-    f"{round(elderly_pop/total_pop*100, 1) if total_pop > 0 else 0}%",
-)
-
-st.divider()
-
-# -----------------------------------------------------------------------------
-# 5. Plotly 지도 시각화 (천안·아산 중심)
-# -----------------------------------------------------------------------------
-st.subheader(f"🗺️ {selected_city} {selected_metric_name} 지도")
-
-# 지도 중심점 좌표 설정 (천안/아산 인근)
-center_lat, center_lon = 36.81, 127.05
-
-fig = px.choropleth_mapbox(
-    filtered_df,
-    geojson=geojson_kr,
-    locations="sigungu_code",
-    featureidkey="properties.코드",
-    color=selected_metric_col,
-    color_continuous_scale="Reds"
-    if "고령" in selected_metric_name or "노인" in selected_metric_name
-    else "Blues",
-    hover_name="동",
-    hover_data={
-        "sigungu_code": False,
-        "시군구": True,
-        "총인구": ":,명",
-        "남성인구": ":,명",
-        "여성인구": ":,명",
-        "아이인구": ":,명",
-        "어른인구": ":,명",
-        "노인인구": ":,명",
-        "고령화율": ":.1f%",
-    },
-    mapbox_style="white-bg",
-    center={"lat": center_lat, "lon": center_lon},
-    zoom=10,
-    opacity=0.8,
-)
-
 fig.update_layout(
-    margin={"r": 0, "t": 10, "l": 0, "b": 10},
-    height=600,
+    height=650,
+    margin=dict(l=0, r=0, t=10, b=0),
+    legend_title_text="",
 )
-fig.update_traces(marker_line_width=0.8, marker_line_color="#444444")
 
 st.plotly_chart(fig, use_container_width=True)
 
-st.divider()
-
-# -----------------------------------------------------------------------------
-# 6. 세부 읍·면·동 순위 데이터표
-# -----------------------------------------------------------------------------
-st.subheader(f"📊 {selected_city} 읍·면·동별 {selected_metric_name} 순위")
-
-df_sorted = filtered_df.sort_values(by=selected_metric_col, ascending=False)
-
-top_10 = df_sorted.head(10)[
-    ["시군구", "동", "총인구", "아이인구", "어른인구", "노인인구", "고령화율"]
-].reset_index(drop=True)
-bottom_10 = (
-    df_sorted.tail(10)
-    .sort_values(by=selected_metric_col, ascending=True)[
-        ["시군구", "동", "총인구", "아이인구", "어른인구", "노인인구", "고령화율"]
-    ]
-    .reset_index(drop=True)
+st.info(
+    "점 하나가 읍·면·동 하나를 나타내며, 점 크기는 그 동의 인구 규모에 비례합니다. "
+    "다만 점의 실제 위치는 시군구 안에서 임의로 배치한 것이라 지도상 정확한 동 위치는 아닙니다."
 )
-
-col1, col2 = st.columns(2)
-
-with col1:
-    st.markdown(f"### 🔴 {selected_metric_name} 높은 읍·면·동 Top 10")
-    st.dataframe(
-        top_10.style.format(
-            {
-                "총인구": "{:,}명",
-                "아이인구": "{:,}명",
-                "어른인구": "{:,}명",
-                "노인인구": "{:,}명",
-                "고령화율": "{:.1f}%",
-            }
-        ),
-        use_container_width=True,
-    )
-
-with col2:
-    st.markdown(f"### 🔵 {selected_metric_name} 낮은 읍·면·동 Top 10")
-    st.dataframe(
-        bottom_10.style.format(
-            {
-                "총인구": "{:,}명",
-                "아이인구": "{:,}명",
-                "어른인구": "{:,}명",
-                "노인인구": "{:,}명",
-                "고령화율": "{:.1f}%",
-            }
-        ),
-        use_container_width=True,
-    )
