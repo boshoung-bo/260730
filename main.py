@@ -48,7 +48,11 @@ pop_df["전체인구"] = get_total_population(pop_df)
 # -----------------------------
 # 천안시 동남구 + 천안시 서북구 -> '천안'으로 묶기
 # 아산시 -> '아산'으로 묶기
-def to_city(sigungu: str):
+def to_city(sigungu):
+    # 시군구 값이 비어있는(NaN) 행이 있을 수 있어서 먼저 걸러줍니다.
+    if pd.isna(sigungu):
+        return None
+    sigungu = str(sigungu)
     if "천안" in sigungu:
         return "천안"
     if "아산" in sigungu:
